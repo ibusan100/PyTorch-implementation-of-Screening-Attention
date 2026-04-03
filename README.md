@@ -103,6 +103,32 @@ python train.py
 pytest tests/
 ```
 
+## Citation
+
+If you use this implementation, please cite the original paper:
+
+```bibtex
+@article{nakanishi2025screening,
+  title   = {Screening Is Enough},
+  author  = {Nakanishi, Ken M.},
+  journal = {arXiv preprint arXiv:2604.01178},
+  year    = {2025},
+  url     = {https://arxiv.org/abs/2604.01178}
+}
+```
+
+To cite this implementation:
+
+```bibtex
+@misc{multiscreen2026,
+  title        = {multiscreen: PyTorch Implementation of Screening Attention},
+  author       = {ibusan100},
+  year         = {2026},
+  howpublished = {\url{https://github.com/ibusan100/PyTorch-implementation-of-Screening-Attention}},
+  note         = {MIT License}
+}
+```
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE)
