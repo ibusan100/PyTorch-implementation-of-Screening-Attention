@@ -12,6 +12,7 @@ Benchmark B v2: WikiText-2 Language Modeling — 修正版
 """
 
 import json, math, os, sys, time
+sys.stdout.reconfigure(line_buffering=True)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -110,12 +111,14 @@ def load_wikitext2_bpe(seq_len, batch_size):
 DEVICE     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SEQ_LEN    = 256
 BATCH_SIZE = 16
-D_MODEL    = 512
-NUM_HEADS  = 8
-NUM_LAYERS = 6
-FFN_DIM    = 1024
+# NOTE: vocab_size=50257のembeddingだけで d_model*50257 params消費するため、
+# d_model=128でembedding=6.4M、transformer layers=~1M → total~7.5M で8M相当
+D_MODEL    = 128
+NUM_HEADS  = 4
+NUM_LAYERS = 4
+FFN_DIM    = 512
 LR         = 3e-4
-MAX_STEPS  = 20_000
+MAX_STEPS  = 10_000
 EVAL_EVERY = 1_000
 GRAD_CLIP  = 1.0
 
@@ -186,33 +189,34 @@ def main():
     cfg = dict(vocab_size=vocab_size, d_model=D_MODEL, num_heads=NUM_HEADS,
                num_layers=NUM_LAYERS, ffn_dim=FFN_DIM, max_seq_len=SEQ_LEN, dropout=0.1)
 
+    out = os.path.join(os.path.dirname(__file__), "results_wikitext2_v2.json")
     results = {}
 
     baseline = TransformerLM(**cfg)
     _, log_b = train(baseline, "TransformerLM (softmax)", train_loader, valid_loader, DEVICE)
     log_b["test_ppl"] = round(evaluate(baseline, test_loader, DEVICE, max_batches=500), 3)
-    print(f"  → test_ppl = {log_b['test_ppl']}")
+    print(f"  -> test_ppl = {log_b['test_ppl']}")
     results["TransformerLM"] = log_b
+    with open(out, "w") as f:
+        json.dump(results, f, indent=2)
     del baseline; torch.cuda.empty_cache()
 
     screening = MultiscreenLM(**cfg)
     _, log_m = train(screening, "MultiscreenLM (screening)", train_loader, valid_loader, DEVICE)
     log_m["test_ppl"] = round(evaluate(screening, test_loader, DEVICE, max_batches=500), 3)
-    print(f"  → test_ppl = {log_m['test_ppl']}")
+    print(f"  -> test_ppl = {log_m['test_ppl']}")
     results["MultiscreenLM"] = log_m
+    with open(out, "w") as f:
+        json.dump(results, f, indent=2)
     del screening; torch.cuda.empty_cache()
 
     print("\n" + "="*65)
-    print("FINAL RESULTS — WikiText-2, GPT-2 BPE tokenizer")
+    print("FINAL RESULTS -- WikiText-2, GPT-2 BPE tokenizer")
     print("="*65)
     for nm, log in results.items():
         print(f"  {nm:<35}  test_ppl={log['test_ppl']:7.3f}  "
               f"params={log['param_count']:,}  elapsed={log['elapsed_s'][-1]:.0f}s")
-
-    out = os.path.join(os.path.dirname(__file__), "results_wikitext2_v2.json")
-    with open(out, "w") as f:
-        json.dump(results, f, indent=2)
-    print(f"\nSaved → {out}")
+    print(f"\nSaved to {out}")
 
 
 if __name__ == "__main__":
