@@ -21,10 +21,27 @@ Combined with a distance-aware cosine softmask and TanhNorm output normalization
 - Stable training at higher learning rates
 - Up to 3.2× lower inference latency at 100K context length
 
+## Benchmark Results
+
+**WikiText-2** (GPT-2 BPE, 7.3M params, 10K steps, RTX 4060 Ti 8GB):
+
+| Model | test PPL | train time |
+|-------|----------:|----------:|
+| TransformerLM | 221.6 | 481s |
+| **MultiscreenLM** | **191.3** | 608s |
+
+**Attention opens up slowly** — r decreases from 2.0 → 1.93 over 5K steps, maintaining ~95% sparsity throughout. The few attended positions appear to be more selective and informative than distributed soft attention.
+
+![r evolution and sparsity during training](benchmarks/r_evolution.png)
+![Attention alpha maps at different training steps](benchmarks/attention_maps.png)
+
+See [BENCHMARK_REPORT.md](BENCHMARK_REPORT.md) for full results including latency benchmarks.
+
 ## Installation
 
 ```bash
 pip install -e ".[dev]"
+pip install datasets transformers  # for train.py
 ```
 
 ## Quick Start
@@ -74,16 +91,16 @@ tokens = model.generate(ids, max_new_tokens=32)
 4. **Unnormalized aggregation** — `h = Σ α·v` (no softmax denominator; absent context → zero vector)
 5. **TanhNorm** — `tanh(‖h‖)/‖h‖ · h` bounds output magnitude without losing direction
 
+## Quick Training (WikiText-2)
+
+```bash
+python train.py
+```
+
 ## Running Tests
 
 ```bash
 pytest tests/
-```
-
-## Example
-
-```bash
-python examples/train_tiny_lm.py
 ```
 
 ## License
