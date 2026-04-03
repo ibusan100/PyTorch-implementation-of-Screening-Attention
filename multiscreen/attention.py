@@ -57,7 +57,12 @@ class ScreeningAttention(nn.Module):
         # Learnable log-scale parameters for window and acceptance width
         # w = exp(s_v) + 1  (screening window size, > 1)
         # r = exp(s_r) + 1  (acceptance sharpness, > 1)
-        self.s_v = nn.Parameter(torch.zeros(num_heads))  # log(w - 1)
+        #
+        # Per paper: s_v linearly spaced from 0 to log(w_th - 1) across heads
+        # (w_th=256), giving initial windows from 2 to 256.
+        # s_r initialized to 0 (r=2) per paper.
+        s_v_init = torch.linspace(0, math.log(255), num_heads)
+        self.s_v = nn.Parameter(s_v_init)          # log(w - 1)
         self.s_r = nn.Parameter(torch.zeros(num_heads))  # log(r - 1)
 
         self.attn_dropout = nn.Dropout(dropout)

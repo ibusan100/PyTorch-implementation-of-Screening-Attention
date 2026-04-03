@@ -63,16 +63,40 @@ def measure_sparsity(seq_len, r_value=None):
     return sum(sparsities) / len(sparsities)
 
 
+def measure_sim_stats(seq_len):
+    """初期化時のコサイン類似度分布を計測"""
+    model = ScreeningAttention(D_MODEL, NUM_HEADS, causal=True).to(DEVICE).eval()
+    with torch.no_grad():
+        x = torch.randn(BATCH, seq_len, D_MODEL, device=DEVICE)
+        q = F.normalize(model.q_proj(x).view(BATCH, seq_len, NUM_HEADS, -1).transpose(1,2), dim=-1)
+        k = F.normalize(model.k_proj(x).view(BATCH, seq_len, NUM_HEADS, -1).transpose(1,2), dim=-1)
+        sim = torch.matmul(q, k.transpose(-2, -1))
+        return {
+            "mean": round(sim.mean().item(), 4),
+            "std":  round(sim.std().item(), 4),
+            "max":  round(sim.max().item(), 4),
+            "frac_gt_0.5": round((sim > 0.5).float().mean().item(), 6),
+        }
+
+
 def main():
     print("=== Screening Sparsity Analysis ===")
     print(f"Device: {DEVICE}, d={D_MODEL}, H={NUM_HEADS}, B={BATCH}\n")
 
-    results = {}
+    # --- コサイン類似度の分布 ---
+    print("--- Cosine similarity distribution at init (seq_len=512) ---")
+    stats = measure_sim_stats(512)
+    print(f"  mean={stats['mean']}  std={stats['std']}  max={stats['max']}")
+    print(f"  P(sim > 0.5) = {stats['frac_gt_0.5']:.6f}")
+    print(f"  -> r=2 threshold (sim > 0.5): almost no pairs exceed it, so init sparsity ~100%\n")
 
-    # r=2 (初期値: s_r=0), r=4, r=8
-    r_configs = {"r=2 (init)": 2.0, "r=4": 4.0, "r=8": 8.0}
+    results = {"sim_stats_seq512": stats}
+
+    # --- Trim-and-Square + softmask 統合スパース率 ---
+    r_configs = {"r=2 (init)": 2.0, "r=1.5": 1.5, "r=1.2": 1.2}
 
     header = f"{'seq_len':>8}" + "".join(f"  {label:>16}" for label in r_configs)
+    print("--- Total sparsity (Trim-and-Square × softmask) ---")
     print(header)
     print("-" * len(header))
 
@@ -85,11 +109,28 @@ def main():
             row += f"  {s*100:>15.1f}%"
         print(row)
 
+    print(f"\n--- Softmask-only zero fraction per head (seq=512, init w linspace) ---")
+    model = ScreeningAttention(D_MODEL, NUM_HEADS, causal=True).to(DEVICE).eval()
+    w = torch.exp(model.s_v) + 1.0
+    import math as _math
+    i_idx = torch.arange(512, device=DEVICE).unsqueeze(1)
+    j_idx = torch.arange(512, device=DEVICE).unsqueeze(0)
+    rel   = (j_idx - i_idx).float()
+    w_    = w.view(-1,1,1)
+    cos_m = 0.5*(torch.cos(_math.pi * rel.unsqueeze(0) / w_) + 1.0)
+    in_w  = ((rel.unsqueeze(0) > -w_) & (rel.unsqueeze(0) <= 0)).float()
+    softmask = cos_m * in_w
+    head_ws = w.tolist()
+    for h in range(NUM_HEADS):
+        frac = (softmask[h] == 0).float().mean().item()
+        print(f"  head {h} (w={head_ws[h]:.1f}): mask_zero={frac*100:.1f}%")
+
     out = os.path.join(os.path.dirname(__file__), "results_sparsity.json")
     with open(out, "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nResults saved to {out}")
-    print("\nNote: higher sparsity → more potential speedup from sparse CUDA kernels")
+    print("\nNote: 100% sparsity at init is by design, not a bug.")
+    print("      During training, s_r decreases (r->1), lowering the threshold so attention opens up.")
 
 
 if __name__ == "__main__":
