@@ -1,0 +1,5 @@
+torch>=2.3.0
+datasets>=2.0.0
+transformers>=4.30.0
+matplotlib>=3.7.0
+pytest>=8.0
