@@ -2,7 +2,7 @@
 
 **実装**: `multiscreen` v0.1.0
 **論文**: "Screening Is Enough" (arXiv:[2604.01178](https://arxiv.org/abs/2604.01178)) — Ken M. Nakanishi
-**実行環境**: NVIDIA GeForce RTX 4060 Ti (16GB VRAM) / PyTorch 2.5.1+cu121 / Python 3.11
+**実行環境**: NVIDIA GeForce RTX 4060 Ti (8GB VRAM) / PyTorch 2.5.1+cu121 / Python 3.11
 
 ---
 
