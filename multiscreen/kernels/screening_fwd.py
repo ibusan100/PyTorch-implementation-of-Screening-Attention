@@ -98,44 +98,86 @@ def _screening_fwd_inner(
     # Accumulator for output: (BLOCK_T, D)
     acc = tl.zeros((BLOCK_T, D), dtype=tl.float32)
 
-    # Iterate over key tiles (all tiles; causal masking applied per-element inside)
-    n_k_tiles = tl.cdiv(T, BLOCK_T)
-    for tile_k in range(0, n_k_tiles):
-        k_start = tile_k * BLOCK_T
-        offs_k  = k_start + tl.arange(0, BLOCK_T)  # (BLOCK_T,)
+    # ---------------------------------------------------------------------------
+    # Key-tile loop
+    #
+    # For causal attention we split into two phases:
+    #   Phase A — "full" tiles  (tile_k < tile_q): all j <= i guaranteed,
+    #             so the causal check is always satisfied.  Skip it entirely.
+    #   Phase B — "diagonal" tile (tile_k == tile_q): j may be > i, apply mask.
+    #
+    # For non-causal we keep a single loop over all tiles.
+    # ---------------------------------------------------------------------------
 
-        # Load K tile: (BLOCK_T, D)
+    if CAUSAL:
+        # --- Phase A: fully-past tiles (no causal mask needed) ---
+        for tile_k in range(0, tile_q):
+            k_start = tile_k * BLOCK_T
+            offs_k  = k_start + tl.arange(0, BLOCK_T)
+
+            k_ptrs = K_ptr + k_base + offs_k[:, None] * stride_kt + offs_d[None, :] * stride_kd
+            k = tl.load(k_ptrs, mask=offs_k[:, None] < T, other=0.0)
+            sim = tl.dot(q, tl.trans(k))
+
+            rel = offs_k[None, :].to(tl.float32) - offs_q[:, None].to(tl.float32)
+            # For tile_k < tile_q: max(rel) = tile_k*BT + BT-1 - tile_q*BT = -(tile_q-tile_k)*BT + BT-1 <= -1
+            # So rel <= 0 always; only need to check rel > -w
+            in_window = rel > -w
+            cos_mask  = 0.5 * (tl.cos(math.pi * rel / w) + 1.0)
+            softmask  = tl.where(in_window, cos_mask, 0.0)
+
+            alpha = tl.maximum(1.0 - r * (1.0 - sim), 0.0)
+            alpha = alpha * alpha * softmask
+            alpha = tl.where(offs_k[None, :] < T, alpha, 0.0)
+
+            v_ptrs = V_ptr + v_base + offs_k[:, None] * stride_vt + offs_d[None, :] * stride_vd
+            v = tl.load(v_ptrs, mask=offs_k[:, None] < T, other=0.0)
+            acc += tl.dot(alpha.to(tl.float32), v.to(tl.float32))
+
+        # --- Phase B: diagonal tile (tile_k == tile_q, full causal mask) ---
+        k_start = tile_q * BLOCK_T
+        offs_k  = k_start + tl.arange(0, BLOCK_T)
+
         k_ptrs = K_ptr + k_base + offs_k[:, None] * stride_kt + offs_d[None, :] * stride_kd
-        k = tl.load(k_ptrs, mask=offs_k[:, None] < T, other=0.0)  # (BLOCK_T, D)
-
-        # Cosine sim: q (BLOCK_T, D) @ k.T (D, BLOCK_T) -> (BLOCK_T, BLOCK_T)
+        k = tl.load(k_ptrs, mask=offs_k[:, None] < T, other=0.0)
         sim = tl.dot(q, tl.trans(k))
 
-        # Relative position: j - i, shape (BLOCK_T_q, BLOCK_T_k)
         rel = offs_k[None, :].to(tl.float32) - offs_q[:, None].to(tl.float32)
+        in_window = (rel > -w) & (rel <= 0.0)
+        cos_mask  = 0.5 * (tl.cos(math.pi * rel / w) + 1.0)
+        softmask  = tl.where(in_window, cos_mask, 0.0)
 
-        # Cosine softmask
-        cos_mask = 0.5 * (tl.cos(math.pi * rel / w) + 1.0)
-        if CAUSAL:
-            in_window = (rel > -w) & (rel <= 0.0)
-        else:
-            in_window = tl.abs(rel) < w
-        softmask = tl.where(in_window, cos_mask, 0.0)
-
-        # Trim-and-Square: alpha = relu(1 - r*(1-sim))^2
         alpha = tl.maximum(1.0 - r * (1.0 - sim), 0.0)
-        alpha = alpha * alpha
-
-        # Apply softmask and OOB zeroing
-        alpha = alpha * softmask
+        alpha = alpha * alpha * softmask
         alpha = tl.where(offs_k[None, :] < T, alpha, 0.0)
 
-        # Load V tile: (BLOCK_T, D)
         v_ptrs = V_ptr + v_base + offs_k[:, None] * stride_vt + offs_d[None, :] * stride_vd
-        v = tl.load(v_ptrs, mask=offs_k[:, None] < T, other=0.0)  # (BLOCK_T, D)
-
-        # Accumulate: alpha (BLOCK_T, BLOCK_T) @ v (BLOCK_T, D) -> (BLOCK_T, D)
+        v = tl.load(v_ptrs, mask=offs_k[:, None] < T, other=0.0)
         acc += tl.dot(alpha.to(tl.float32), v.to(tl.float32))
+
+    else:
+        # --- Non-causal: single loop over all tiles ---
+        n_k_tiles = tl.cdiv(T, BLOCK_T)
+        for tile_k in range(0, n_k_tiles):
+            k_start = tile_k * BLOCK_T
+            offs_k  = k_start + tl.arange(0, BLOCK_T)
+
+            k_ptrs = K_ptr + k_base + offs_k[:, None] * stride_kt + offs_d[None, :] * stride_kd
+            k = tl.load(k_ptrs, mask=offs_k[:, None] < T, other=0.0)
+            sim = tl.dot(q, tl.trans(k))
+
+            rel      = offs_k[None, :].to(tl.float32) - offs_q[:, None].to(tl.float32)
+            in_window = tl.abs(rel) < w
+            cos_mask  = 0.5 * (tl.cos(math.pi * rel / w) + 1.0)
+            softmask  = tl.where(in_window, cos_mask, 0.0)
+
+            alpha = tl.maximum(1.0 - r * (1.0 - sim), 0.0)
+            alpha = alpha * alpha * softmask
+            alpha = tl.where(offs_k[None, :] < T, alpha, 0.0)
+
+            v_ptrs = V_ptr + v_base + offs_k[:, None] * stride_vt + offs_d[None, :] * stride_vd
+            v = tl.load(v_ptrs, mask=offs_k[:, None] < T, other=0.0)
+            acc += tl.dot(alpha.to(tl.float32), v.to(tl.float32))
 
     # Write output
     o_ptrs = Out_ptr + o_base + offs_q[:, None] * stride_ot + offs_d[None, :] * stride_od
