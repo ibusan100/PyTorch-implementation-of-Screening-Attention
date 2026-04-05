@@ -111,7 +111,16 @@ def _screening_fwd_inner(
 
     if CAUSAL:
         # --- Phase A: fully-past tiles (no causal mask needed) ---
-        for tile_k in range(0, tile_q):
+        #
+        # Window-based block pruning:
+        # A past key tile is in-window only if its CLOSEST key (k_end = k_start+BT-1)
+        # satisfies: q_start - k_end < w  =>  k_start >= q_start - w - BT + 1
+        # => tile_k >= (q_start - w) / BLOCK_T  (floor, conservative)
+        # Using integer truncation of w (safe: w_int <= w => range is wider).
+        w_int = w.to(tl.int32)
+        min_tile_k_a = tl.maximum(0, (tile_q * BLOCK_T - w_int) // BLOCK_T)
+
+        for tile_k in range(min_tile_k_a, tile_q):
             k_start = tile_k * BLOCK_T
             offs_k  = k_start + tl.arange(0, BLOCK_T)
 
@@ -120,8 +129,7 @@ def _screening_fwd_inner(
             sim = tl.dot(q, tl.trans(k))
 
             rel = offs_k[None, :].to(tl.float32) - offs_q[:, None].to(tl.float32)
-            # For tile_k < tile_q: max(rel) = tile_k*BT + BT-1 - tile_q*BT = -(tile_q-tile_k)*BT + BT-1 <= -1
-            # So rel <= 0 always; only need to check rel > -w
+            # For tile_k < tile_q: rel <= 0 always; only need to check rel > -w
             in_window = rel > -w
             cos_mask  = 0.5 * (tl.cos(math.pi * rel / w) + 1.0)
             softmask  = tl.where(in_window, cos_mask, 0.0)

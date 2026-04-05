@@ -67,12 +67,17 @@ def _screening_bwd_dv(
     dv_acc = tl.zeros((BLOCK_T, D), dtype=tl.float32)
 
     # Iterate over query tiles that can attend to this key tile
+    # Window pruning: query tile is active only if q_start - k_end < w
+    #   k_end = tile_k * BLOCK_T + BLOCK_T - 1
+    #   q_start < k_end + w  =>  tile_q < (k_end + w) / BLOCK_T
+    w_int = w.to(tl.int32)
+    k_end  = tile_k * BLOCK_T + BLOCK_T - 1
+    max_tile_q = tl.minimum(tl.cdiv(T, BLOCK_T), (k_end + w_int) // BLOCK_T + 1)
     if CAUSAL:
-        # key tile_k is attended by query tiles tile_q >= tile_k
-        q_tile_start = tile_k
+        q_tile_start = tile_k   # causal: query >= key
     else:
         q_tile_start = 0
-    n_q_tiles = tl.cdiv(T, BLOCK_T)
+    n_q_tiles = max_tile_q
 
     for tile_q in range(q_tile_start, n_q_tiles):
         q_start = tile_q * BLOCK_T
@@ -160,13 +165,16 @@ def _screening_bwd_dqk(
     # Accumulator for dQ
     dq_acc = tl.zeros((BLOCK_T, D), dtype=tl.float32)
 
-    # Number of key tiles to process
+    # Number of key tiles to process (causal + window pruning)
+    w_int = w.to(tl.int32)
     if CAUSAL:
-        n_k_tiles = tile_q + 1   # only past tiles (including diagonal)
+        n_k_tiles = tile_q + 1
+        min_tile_k = tl.maximum(0, (tile_q * BLOCK_T - w_int) // BLOCK_T)
     else:
         n_k_tiles = tl.cdiv(T, BLOCK_T)
+        min_tile_k = 0
 
-    for tile_k in range(0, n_k_tiles):
+    for tile_k in range(min_tile_k, n_k_tiles):
         k_start = tile_k * BLOCK_T
         offs_k  = k_start + tl.arange(0, BLOCK_T)
 
