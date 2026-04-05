@@ -1,0 +1,68 @@
+[
+  {
+    "seq_len": 128,
+    "pt_ms": 0.783,
+    "tri_ms": 1.056,
+    "speedup": 0.74,
+    "tput_pt": 653645,
+    "tput_tri": 485032,
+    "mem_pt_mb": 29.0,
+    "mem_tri_mb": 25.3,
+    "mem_reduction": 1.15
+  },
+  {
+    "seq_len": 256,
+    "pt_ms": 1.833,
+    "tri_ms": 1.212,
+    "speedup": 1.51,
+    "tput_pt": 558596,
+    "tput_tri": 844588,
+    "mem_pt_mb": 54.7,
+    "mem_tri_mb": 34.7,
+    "mem_reduction": 1.57
+  },
+  {
+    "seq_len": 512,
+    "pt_ms": 2.783,
+    "tri_ms": 1.104,
+    "speedup": 2.52,
+    "tput_pt": 735865,
+    "tput_tri": 1855067,
+    "mem_pt_mb": 146.9,
+    "mem_tri_mb": 52.6,
+    "mem_reduction": 2.8
+  },
+  {
+    "seq_len": 1024,
+    "pt_ms": 11.385,
+    "tri_ms": 2.155,
+    "speedup": 5.28,
+    "tput_pt": 359777,
+    "tput_tri": 1900781,
+    "mem_pt_mb": 495.1,
+    "mem_tri_mb": 88.2,
+    "mem_reduction": 5.61
+  },
+  {
+    "seq_len": 2048,
+    "pt_ms": 43.348,
+    "tri_ms": 5.93,
+    "speedup": 7.31,
+    "tput_pt": 188982,
+    "tput_tri": 1381412,
+    "mem_pt_mb": 1845.6,
+    "mem_tri_mb": 159.5,
+    "mem_reduction": 11.57
+  },
+  {
+    "seq_len": 4096,
+    "pt_ms": 2089.773,
+    "tri_ms": 18.641,
+    "speedup": 112.1,
+    "tput_pt": 7840,
+    "tput_tri": 878909,
+    "mem_pt_mb": 7164.0,
+    "mem_tri_mb": 302.1,
+    "mem_reduction": 23.71
+  }
+]
