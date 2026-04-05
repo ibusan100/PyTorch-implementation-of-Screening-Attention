@@ -174,51 +174,48 @@ def _screening_bwd_dqk(
         n_k_tiles = tl.cdiv(T, BLOCK_T)
         min_tile_k = 0
 
+    threshold = 1.0 - 1.0 / r
+
     for tile_k in range(min_tile_k, n_k_tiles):
         k_start = tile_k * BLOCK_T
         offs_k  = k_start + tl.arange(0, BLOCK_T)
 
         k_ptrs = K_ptr + k_base + offs_k[:, None] * stride_kt + offs_d[None, :] * stride_kd
-        v_ptrs = V_ptr + v_base + offs_k[:, None] * stride_vt + offs_d[None, :] * stride_vd
         k = tl.load(k_ptrs, mask=offs_k[:, None] < T, other=0.0)
-        v = tl.load(v_ptrs, mask=offs_k[:, None] < T, other=0.0)
 
-        # Cosine sim and softmask
+        # Cosine sim
         sim = tl.dot(q, tl.trans(k))
         rel = offs_k[None, :].to(tl.float32) - offs_q[:, None].to(tl.float32)
-        cos_mask = 0.5 * (tl.cos(math.pi * rel / w) + 1.0)
         if CAUSAL:
             in_window = (rel > -w) & (rel <= 0.0)
         else:
             in_window = tl.abs(rel) < w
-        softmask = tl.where(in_window, cos_mask, 0.0)
 
-        # Forward quantities
-        a     = tl.maximum(1.0 - r * (1.0 - sim), 0.0)      # (BT_q, BT_k)
-        alpha = a * a * softmask
-        valid = (offs_k[None, :] < T) & (offs_q[:, None] < T)
-        alpha = tl.where(valid, alpha, 0.0)
+        # --- Phase 2-b: block-level skip ---
+        sim_in_win = tl.where(in_window & (offs_k[None, :] < T), sim, -2.0)
+        max_sim = tl.max(sim_in_win)
+        if max_sim > threshold:
+            cos_mask = 0.5 * (tl.cos(math.pi * rel / w) + 1.0)
+            softmask = tl.where(in_window, cos_mask, 0.0)
 
-        # d_alpha_ij = dOut_i · v_j  (outer product via matmul)
-        # do: (BT_q, D),  v: (BT_k, D)  =>  (BT_q, BT_k)
-        d_alpha = tl.dot(do, tl.trans(v)) * softmask
-        d_alpha = tl.where(valid, d_alpha, 0.0)
+            a     = tl.maximum(1.0 - r * (1.0 - sim), 0.0)
+            valid = (offs_k[None, :] < T) & (offs_q[:, None] < T)
 
-        # d_a_ij = 2 * a_ij * d_alpha_ij
-        # d_sim_ij = r * (a > 0) * d_a_ij
-        d_a   = 2.0 * a * d_alpha
-        d_sim = r * (a > 0).to(tl.float32) * d_a   # (BT_q, BT_k)
+            v_ptrs = V_ptr + v_base + offs_k[:, None] * stride_vt + offs_d[None, :] * stride_vd
+            v = tl.load(v_ptrs, mask=offs_k[:, None] < T, other=0.0)
 
-        # dQ_i += sum_j d_sim_ij * k_j   =>  d_sim (BT_q, BT_k) @ k (BT_k, D) -> (BT_q, D)
-        dq_acc += tl.dot(d_sim.to(tl.float32), k.to(tl.float32))
+            d_alpha = tl.dot(do, tl.trans(v)) * softmask
+            d_alpha = tl.where(valid, d_alpha, 0.0)
 
-        # dK_j += sum_i d_sim_ij * q_i   =>  d_sim^T (BT_k, BT_q) @ q (BT_q, D) -> (BT_k, D)
-        dk_delta = tl.dot(tl.trans(d_sim).to(tl.float32), q.to(tl.float32))
+            d_a   = 2.0 * a * d_alpha
+            d_sim = r * (a > 0).to(tl.float32) * d_a
 
-        # Atomic add to dK (multiple query tiles write to same key tile)
-        dk_ptrs = dK_ptr + dk_base + offs_k[:, None] * stride_dkt + offs_d[None, :] * stride_dkd
-        tl.atomic_add(dk_ptrs, dk_delta.to(dK_ptr.dtype.element_ty),
-                      mask=offs_k[:, None] < T)
+            dq_acc += tl.dot(d_sim.to(tl.float32), k.to(tl.float32))
+
+            dk_delta = tl.dot(tl.trans(d_sim).to(tl.float32), q.to(tl.float32))
+            dk_ptrs = dK_ptr + dk_base + offs_k[:, None] * stride_dkt + offs_d[None, :] * stride_dkd
+            tl.atomic_add(dk_ptrs, dk_delta.to(dK_ptr.dtype.element_ty),
+                          mask=offs_k[:, None] < T)
 
     # Store dQ
     dq_ptrs = dQ_ptr + dq_base + offs_q[:, None] * stride_dqt + offs_d[None, :] * stride_dqd

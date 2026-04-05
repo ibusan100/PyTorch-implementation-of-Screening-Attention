@@ -120,6 +120,9 @@ def _screening_fwd_inner(
         w_int = w.to(tl.int32)
         min_tile_k_a = tl.maximum(0, (tile_q * BLOCK_T - w_int) // BLOCK_T)
 
+        # threshold: sim must exceed this for Trim-and-Square to be non-zero
+        threshold = 1.0 - 1.0 / r
+
         for tile_k in range(min_tile_k_a, tile_q):
             k_start = tile_k * BLOCK_T
             offs_k  = k_start + tl.arange(0, BLOCK_T)
@@ -129,18 +132,23 @@ def _screening_fwd_inner(
             sim = tl.dot(q, tl.trans(k))
 
             rel = offs_k[None, :].to(tl.float32) - offs_q[:, None].to(tl.float32)
-            # For tile_k < tile_q: rel <= 0 always; only need to check rel > -w
             in_window = rel > -w
-            cos_mask  = 0.5 * (tl.cos(math.pi * rel / w) + 1.0)
-            softmask  = tl.where(in_window, cos_mask, 0.0)
 
-            alpha = tl.maximum(1.0 - r * (1.0 - sim), 0.0)
-            alpha = alpha * alpha * softmask
-            alpha = tl.where(offs_k[None, :] < T, alpha, 0.0)
+            # --- Phase 2-b: block-level Trim-and-Square skip ---
+            # If max in-window sim <= threshold, all alpha = 0 -> skip V load + acc
+            sim_in_win = tl.where(in_window & (offs_k[None, :] < T), sim, -2.0)
+            max_sim = tl.max(sim_in_win)
+            if max_sim > threshold:
+                cos_mask = 0.5 * (tl.cos(math.pi * rel / w) + 1.0)
+                softmask = tl.where(in_window, cos_mask, 0.0)
 
-            v_ptrs = V_ptr + v_base + offs_k[:, None] * stride_vt + offs_d[None, :] * stride_vd
-            v = tl.load(v_ptrs, mask=offs_k[:, None] < T, other=0.0)
-            acc += tl.dot(alpha.to(tl.float32), v.to(tl.float32))
+                alpha = tl.maximum(1.0 - r * (1.0 - sim), 0.0)
+                alpha = alpha * alpha * softmask
+                alpha = tl.where(offs_k[None, :] < T, alpha, 0.0)
+
+                v_ptrs = V_ptr + v_base + offs_k[:, None] * stride_vt + offs_d[None, :] * stride_vd
+                v = tl.load(v_ptrs, mask=offs_k[:, None] < T, other=0.0)
+                acc += tl.dot(alpha.to(tl.float32), v.to(tl.float32))
 
         # --- Phase B: diagonal tile (tile_k == tile_q, full causal mask) ---
         k_start = tile_q * BLOCK_T
@@ -152,19 +160,24 @@ def _screening_fwd_inner(
 
         rel = offs_k[None, :].to(tl.float32) - offs_q[:, None].to(tl.float32)
         in_window = (rel > -w) & (rel <= 0.0)
-        cos_mask  = 0.5 * (tl.cos(math.pi * rel / w) + 1.0)
-        softmask  = tl.where(in_window, cos_mask, 0.0)
 
-        alpha = tl.maximum(1.0 - r * (1.0 - sim), 0.0)
-        alpha = alpha * alpha * softmask
-        alpha = tl.where(offs_k[None, :] < T, alpha, 0.0)
+        sim_in_win = tl.where(in_window & (offs_k[None, :] < T), sim, -2.0)
+        max_sim = tl.max(sim_in_win)
+        if max_sim > threshold:
+            cos_mask = 0.5 * (tl.cos(math.pi * rel / w) + 1.0)
+            softmask = tl.where(in_window, cos_mask, 0.0)
 
-        v_ptrs = V_ptr + v_base + offs_k[:, None] * stride_vt + offs_d[None, :] * stride_vd
-        v = tl.load(v_ptrs, mask=offs_k[:, None] < T, other=0.0)
-        acc += tl.dot(alpha.to(tl.float32), v.to(tl.float32))
+            alpha = tl.maximum(1.0 - r * (1.0 - sim), 0.0)
+            alpha = alpha * alpha * softmask
+            alpha = tl.where(offs_k[None, :] < T, alpha, 0.0)
+
+            v_ptrs = V_ptr + v_base + offs_k[:, None] * stride_vt + offs_d[None, :] * stride_vd
+            v = tl.load(v_ptrs, mask=offs_k[:, None] < T, other=0.0)
+            acc += tl.dot(alpha.to(tl.float32), v.to(tl.float32))
 
     else:
         # --- Non-causal: single loop over all tiles ---
+        threshold = 1.0 - 1.0 / r
         n_k_tiles = tl.cdiv(T, BLOCK_T)
         for tile_k in range(0, n_k_tiles):
             k_start = tile_k * BLOCK_T
@@ -174,18 +187,22 @@ def _screening_fwd_inner(
             k = tl.load(k_ptrs, mask=offs_k[:, None] < T, other=0.0)
             sim = tl.dot(q, tl.trans(k))
 
-            rel      = offs_k[None, :].to(tl.float32) - offs_q[:, None].to(tl.float32)
+            rel       = offs_k[None, :].to(tl.float32) - offs_q[:, None].to(tl.float32)
             in_window = tl.abs(rel) < w
-            cos_mask  = 0.5 * (tl.cos(math.pi * rel / w) + 1.0)
-            softmask  = tl.where(in_window, cos_mask, 0.0)
 
-            alpha = tl.maximum(1.0 - r * (1.0 - sim), 0.0)
-            alpha = alpha * alpha * softmask
-            alpha = tl.where(offs_k[None, :] < T, alpha, 0.0)
+            sim_in_win = tl.where(in_window & (offs_k[None, :] < T), sim, -2.0)
+            max_sim = tl.max(sim_in_win)
+            if max_sim > threshold:
+                cos_mask = 0.5 * (tl.cos(math.pi * rel / w) + 1.0)
+                softmask = tl.where(in_window, cos_mask, 0.0)
 
-            v_ptrs = V_ptr + v_base + offs_k[:, None] * stride_vt + offs_d[None, :] * stride_vd
-            v = tl.load(v_ptrs, mask=offs_k[:, None] < T, other=0.0)
-            acc += tl.dot(alpha.to(tl.float32), v.to(tl.float32))
+                alpha = tl.maximum(1.0 - r * (1.0 - sim), 0.0)
+                alpha = alpha * alpha * softmask
+                alpha = tl.where(offs_k[None, :] < T, alpha, 0.0)
+
+                v_ptrs = V_ptr + v_base + offs_k[:, None] * stride_vt + offs_d[None, :] * stride_vd
+                v = tl.load(v_ptrs, mask=offs_k[:, None] < T, other=0.0)
+                acc += tl.dot(alpha.to(tl.float32), v.to(tl.float32))
 
     # Write output
     o_ptrs = Out_ptr + o_base + offs_q[:, None] * stride_ot + offs_d[None, :] * stride_od
