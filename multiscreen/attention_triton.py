@@ -1,11 +1,9 @@
 """
 Triton-backed Screening Attention.
 
-Drop-in replacement for ScreeningAttention that uses a fused Triton kernel
-for the forward pass, avoiding materialization of the T×T alpha matrix.
-
-Backward pass falls back to PyTorch autograd (recomputes alpha from saved
-q, k, v tensors).  A fully custom backward Triton kernel is a future TODO.
+Drop-in replacement for ScreeningAttention that uses fused Triton kernels
+for both forward and backward passes, avoiding materialization of the T×T
+alpha matrix entirely.
 
 Usage:
     from multiscreen.attention_triton import ScreeningAttentionTriton
@@ -20,13 +18,14 @@ import torch.nn.functional as F
 
 from .norm import TanhNorm
 from .kernels.screening_fwd import screening_attention_fwd
+from .kernels.screening_bwd import screening_attention_bwd
 
 
-class _ScreeningFwdFunc(torch.autograd.Function):
+class _ScreeningFunc(torch.autograd.Function):
     """
     Custom autograd Function.
-    - Forward:  uses Triton fused kernel (no T×T alloc)
-    - Backward: PyTorch recompute from saved q/k/v/r/w
+    - Forward:  Triton fused kernel (no T×T alloc)
+    - Backward: Triton fused kernels for dQ, dK, dV (no T×T alloc)
     """
 
     @staticmethod
@@ -39,41 +38,14 @@ class _ScreeningFwdFunc(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_out):
         q, k, v, r, w = ctx.saved_tensors
-        causal = ctx.causal
-
-        # Recompute alpha with PyTorch (dense) for grad computation.
-        # This is O(T²) memory during backward only — forward stays fused.
-        with torch.enable_grad():
-            q2 = q.detach().requires_grad_(True)
-            k2 = k.detach().requires_grad_(True)
-            v2 = v.detach().requires_grad_(True)
-            r2 = r.detach().requires_grad_(True)
-            w2 = w.detach().requires_grad_(True)
-
-            sim = torch.matmul(q2, k2.transpose(-2, -1))
-            alpha = F.relu(1.0 - r2.view(1, -1, 1, 1) * (1.0 - sim)).pow(2)
-
-            T_q, T_k = q.shape[2], k.shape[2]
-            i_idx = torch.arange(T_q, device=q.device).unsqueeze(1)
-            j_idx = torch.arange(T_k, device=q.device).unsqueeze(0)
-            rel = (j_idx - i_idx).float()
-            w_b = w2.view(-1, 1, 1)
-            cos_m = 0.5 * (torch.cos(math.pi * rel.unsqueeze(0) / w_b) + 1.0)
-            if causal:
-                in_w = (rel.unsqueeze(0) > -w_b) & (rel.unsqueeze(0) <= 0.0)
-            else:
-                in_w = rel.unsqueeze(0).abs() < w_b
-            softmask = cos_m * in_w.float()
-            alpha = alpha * softmask.unsqueeze(0)
-
-            out2 = torch.matmul(alpha, v2)
-            out2.backward(grad_out)
-
-        return q2.grad, k2.grad, v2.grad, r2.grad, w2.grad, None
+        dQ, dK, dV = screening_attention_bwd(
+            q, k, v, grad_out.contiguous(), r, w, causal=ctx.causal
+        )
+        return dQ, dK, dV, None, None, None
 
 
 def _screening_fused(q, k, v, r, w, causal):
-    return _ScreeningFwdFunc.apply(q, k, v, r, w, causal)
+    return _ScreeningFunc.apply(q, k, v, r, w, causal)
 
 
 class ScreeningAttentionTriton(nn.Module):
